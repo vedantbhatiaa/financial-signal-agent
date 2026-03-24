@@ -1,0 +1,68 @@
+version: "3.9"
+
+# Three services:
+#   postgres  — relational store for structured price + indicator data
+#   mongo     — document store for raw news and SEC filings
+#   app       — the FastAPI + agent service
+
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: finagent_postgres
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pass}
+      POSTGRES_DB:       ${POSTGRES_DB:-findb}
+    ports:
+      - "5432:5432"
+    volumes:
+      # Named volume persists data across container restarts
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:     ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user}"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
+  mongo:
+    image: mongo:7
+    container_name: finagent_mongo
+    environment:
+      MONGO_INITDB_DATABASE: findb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test:     ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
+  app:
+    build:
+      context:    .
+      dockerfile: Dockerfile
+    container_name: finagent_app
+    # Wait for databases to be healthy before starting the app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    environment:
+      POSTGRES_URI: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@postgres:5432/${POSTGRES_DB:-findb}
+      MONGO_URI:    mongodb://mongo:27017
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      NEWS_API_KEY:   ${NEWS_API_KEY}
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount local data/ directory so lineage logs and ChromaDB persist
+      - ./data:/app/data
+    command: uvicorn api.app:app --host 0.0.0.0 --port 8000
+
+volumes:
+  postgres_data:
+  mongo_data:

@@ -1,0 +1,29 @@
+# Environment — NEVER commit secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Jupyter — outputs stripped by nbstripout, but checkpoint folders excluded too
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data — raw and processed data is not tracked in Git (too large, regeneratable)
+data/raw/
+data/processed/
+data/chroma/
+data/lineage/
+
+# Docker
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.DS_Store
