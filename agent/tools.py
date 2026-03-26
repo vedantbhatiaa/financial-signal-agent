@@ -1,16 +1,17 @@
 """
 agent/tools.py
 --------------
-Defines the three tools available to the LangChain agent.
+Defines the four tools available to the LangChain agent.
 
 Each tool is a Python function decorated with @tool. The docstring is
 critical — LangChain passes it directly to the LLM so the agent knows
 when and how to use each tool. Keep docstrings precise and unambiguous.
 
 Tools:
-  1. query_price_data      — SQL queries against PostgreSQL (structured)
-  2. search_financial_news — semantic RAG search over ChromaDB (unstructured)
-  3. get_filing_metadata   — metadata lookup from MongoDB (semi-structured)
+  1. query_price_data       — SQL queries against PostgreSQL (structured)
+  2. search_financial_news  — semantic RAG search over ChromaDB (unstructured)
+  3. get_filing_metadata    — metadata lookup from MongoDB (semi-structured)
+  4. query_knowledge_graph  — graph query from MongoDB (graph/network data)
 
 Embeddings use HuggingFace's all-MiniLM-L6-v2 (runs locally, completely free)
 instead of OpenAI embeddings. The model is ~90MB and downloads automatically
@@ -40,7 +41,7 @@ _engine = create_engine(
     os.getenv("POSTGRES_URI", "postgresql://user:pass@localhost:5432/findb")
 )
 
-# MongoDB — raw news documents and SEC filing metadata
+# MongoDB — raw news documents, SEC filing metadata, and knowledge graph
 _mongo_client = MongoClient(
     os.getenv("MONGO_URI", "mongodb://localhost:27017")
 )
@@ -58,9 +59,9 @@ _filings_col   = _chroma_client.get_or_create_collection("filing_chunks")
 # NOTE: must match the model used in 02_pipeline.ipynb at ingestion time —
 # mixing models produces meaningless similarity scores.
 _embeddings = HuggingFaceEmbeddings(
-    model_name      = "all-MiniLM-L6-v2",
-    model_kwargs    = {"device": "cpu"},   # change to "cuda" if you have a GPU
-    encode_kwargs   = {"normalize_embeddings": True}  # cosine similarity works better normalised
+    model_name    = "all-MiniLM-L6-v2",
+    model_kwargs  = {"device": "cpu"},              # change to "cuda" if you have a GPU
+    encode_kwargs = {"normalize_embeddings": True}  # cosine similarity works better normalised
 )
 
 
@@ -73,7 +74,7 @@ def query_price_data(sql: str) -> str:
     """Query PostgreSQL for historical stock price data, volume, and technical indicators.
 
     The database contains daily OHLCV data for AAPL, NVDA, MSFT, GOOGL, AMZN,
-    TSLA, META, JPM, GS, BAC over the last 2 years.
+    TSLA, META, JPM, GS, BAC over the last 100 trading days.
 
     Table schema:
         prices(ticker VARCHAR, date DATE, open NUMERIC, high NUMERIC,
@@ -112,18 +113,19 @@ def query_price_data(sql: str) -> str:
 # ---------------------------------------------------------------------------
 
 @tool
-def search_financial_news(query: str, ticker: str = "") -> str:
+def search_financial_news(query: str) -> str:
     """Semantic search over financial news articles and SEC risk factor filings.
 
     Use this tool when the question requires qualitative context: sentiment,
     analyst opinion, risk disclosures, market commentary, or recent events.
     Results come from two ChromaDB collections:
-      - news_chunks    : news headlines and summaries (Reuters, FT, NewsAPI)
+      - news_chunks    : news headlines and summaries (Reuters, FT, NewsAPI,
+                         and ticker-specific Yahoo Finance RSS feeds)
       - filing_chunks  : SEC 10-K and 10-Q risk factor sections
 
     Args:
-        query  : natural language search query (what you are looking for)
-        ticker : optional ticker symbol to narrow results (e.g. 'NVDA')
+        query : natural language search query describing what you are looking for.
+                Include the company name or ticker in the query text itself.
 
     Returns top 5 most relevant text chunks with source and date metadata.
     """
@@ -132,22 +134,17 @@ def search_financial_news(query: str, ticker: str = "") -> str:
         # this is what makes the similarity search meaningful
         query_vector = _embeddings.embed_query(query)
 
-        # Optional metadata filter — ChromaDB supports filtering by any
-        # metadata field stored alongside the vectors
-        where_filter = {"ticker": ticker} if ticker else None
-
+        # No ticker filter — search across all tickers for maximum recall.
+        # Ticker detection was applied at ingestion time so relevant articles
+        # will surface naturally through semantic similarity.
         all_chunks = []
 
         for collection, source_label in [(_news_col, "news"), (_filings_col, "sec_filing")]:
-            kwargs = {
-                "query_embeddings" : [query_vector],
-                "n_results"        : 3,
-                "include"          : ["documents", "metadatas", "distances"]
-            }
-            if where_filter:
-                kwargs["where"] = where_filter
-
-            res = collection.query(**kwargs)
+            res = collection.query(
+                query_embeddings = [query_vector],
+                n_results        = 3,
+                include          = ["documents", "metadatas", "distances"]
+            )
 
             for doc, meta, dist in zip(
                 res["documents"][0],
@@ -176,27 +173,26 @@ def search_financial_news(query: str, ticker: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 @tool
-def get_filing_metadata(ticker: str, form_type: str = "10-K") -> str:
-    """Retrieve structured metadata for a company's most recent SEC filing from MongoDB.
+def get_filing_metadata(ticker: str) -> str:
+    """Retrieve structured metadata for a company's most recent SEC 10-K filing from MongoDB.
 
     Use this tool when you need precise filing details: filing date, accession
     number, company name, or to confirm what period a filing covers.
     This complements search_financial_news, which retrieves the filing text.
 
     Args:
-        ticker    : stock ticker symbol (e.g. 'AAPL', 'JPM')
-        form_type : SEC form type — '10-K' (annual) or '10-Q' (quarterly)
+        ticker : stock ticker symbol (e.g. 'AAPL', 'JPM')
 
-    Returns filing metadata as a JSON string, or an error message if not found.
+    Returns the most recent 10-K filing metadata as a JSON string.
     """
     try:
         doc = _db["sec_filings"].find_one(
-            {"ticker": ticker.upper(), "form_type": form_type},
-            sort       = [("filing_date", -1)],        # most recent filing first
-            projection = {"_id": 0, "risk_text": 0}    # exclude raw text — too large for context
+            {"ticker": ticker.upper(), "form_type": "10-K"},
+            sort       = [("filing_date", -1)],     # most recent filing first
+            projection = {"_id": 0, "risk_text": 0} # exclude raw text — too large for context
         )
         if not doc:
-            return f"No {form_type} filing found for {ticker}"
+            return f"No 10-K filing found for {ticker}"
 
         # default=str handles ObjectId, datetime, and Decimal serialisation
         return json.dumps(doc, default=str, indent=2)
@@ -205,5 +201,57 @@ def get_filing_metadata(ticker: str, form_type: str = "10-K") -> str:
         return f"MongoDB error: {str(e)}"
 
 
-# Expose all three tools as a list — imported by agent.py
-TOOLS = [query_price_data, search_financial_news, get_filing_metadata]
+# ---------------------------------------------------------------------------
+# Tool 4 — Company relationship knowledge graph from MongoDB
+# ---------------------------------------------------------------------------
+
+@tool
+def query_knowledge_graph(question: str) -> str:
+    """Query the company co-mention knowledge graph stored in MongoDB.
+
+    The graph was built from news articles — nodes are companies (tickers),
+    edges represent co-mention relationships where two companies appeared
+    in the same news headline. Edge weight = number of shared articles.
+
+    Use this tool for questions about:
+    - Which companies are most frequently mentioned together
+    - Relationship strength between two specific companies
+    - Network-level analysis across the watchlist
+
+    Args:
+        question : natural language question about company relationships.
+                   The tool returns the top co-mention pairs regardless of
+                   the specific question — use the data to answer it.
+
+    Returns graph summary with top co-mention relationships and weights.
+    """
+    try:
+        doc = _db["knowledge_graph"].find_one(
+            {"type": "company_relationship_graph"},
+            projection={"_id": 0}
+        )
+        if not doc:
+            return "Knowledge graph not found. Run 01_data_ingestion.ipynb first."
+
+        # Sort edges by co-mention weight descending
+        edges = sorted(
+            doc.get("edges", []),
+            key=lambda x: x.get("weight", 0),
+            reverse=True
+        )
+
+        return json.dumps({
+            "graph_description" : doc.get("description", ""),
+            "total_nodes"       : len(doc.get("nodes", [])),
+            "total_edges"       : len(edges),
+            "top_relationships" : edges[:10]  # top 10 strongest co-mention pairs
+        }, indent=2)
+
+    except Exception as e:
+        return f"Graph query error: {str(e)}"
+
+
+# ---------------------------------------------------------------------------
+# Expose all four tools as a list — imported by agent.py and mcp_server.py
+# ---------------------------------------------------------------------------
+TOOLS = [query_price_data, search_financial_news, get_filing_metadata, query_knowledge_graph]
