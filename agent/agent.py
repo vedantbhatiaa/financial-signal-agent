@@ -2,10 +2,7 @@
 agent/agent.py
 --------------
 Financial News Sentiment Trading Signal Agent.
-Uses a custom agent loop built on langchain_core only — avoids
-AgentExecutor import issues across LangChain versions.
-
-LLM    : Groq free tier (llama3-70b-8192)
+LLM    : Groq (llama-3.3-70b-versatile)
 Tools  : query_price_data, search_financial_news, get_filing_metadata
 """
 
@@ -34,6 +31,7 @@ a real-time data pipeline. You have access to three tools:
 Reasoning rules:
 - Always call a tool before making any factual claim about prices or news.
 - For divergence questions, call BOTH query_price_data AND search_financial_news.
+- For sentiment queries, call search_financial_news with just the query text and NO ticker filter.
 - If a SQL query returns an error, try a corrected query.
 - Cite the source and date of evidence in your final answer.
 - If data is insufficient, say so clearly rather than speculating.
@@ -51,21 +49,20 @@ class ToolAction:
 
 
 class FinancialAgent:
-    """Simple tool-calling agent loop built on langchain_core.
-    Replaces AgentExecutor to avoid version-specific import issues.
-    """
+    """Simple tool-calling agent loop built on langchain_core."""
 
     def __init__(self, verbose: bool = False):
         self.verbose  = verbose
         self.tool_map = {t.name: t for t in TOOLS}
 
         llm = ChatGroq(
-            model = "llama-3.3-70b-versatile",
+            model        = "llama-3.3-70b-versatile",
             temperature  = 0,
             groq_api_key = os.getenv("GROQ_API_KEY")
         )
-        # Bind tools so Groq knows the function signatures
-        self.llm = llm.bind_tools(TOOLS)
+        # parallel_tool_calls=False forces one tool call at a time
+        # which prevents malformed JSON generation errors
+        self.llm = llm.bind_tools(TOOLS, parallel_tool_calls=False)
 
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", SYSTEM_PROMPT),
@@ -73,29 +70,25 @@ class FinancialAgent:
         ])
 
     def invoke(self, input_dict: dict) -> dict:
-        """Run a question through the agent and return result dict.
-        Output format matches AgentExecutor so notebook code works unchanged.
-        """
+        """Run a question through the agent and return result dict."""
         question           = input_dict["input"]
         messages           = [HumanMessage(content=question)]
         intermediate_steps = []
 
-        for iteration in range(8):  # max iterations — prevents infinite loops
+        for iteration in range(8):
             chain    = self.prompt | self.llm
             response = chain.invoke({"messages": messages})
             messages.append(response)
 
-            # No tool calls means the agent has a final answer
             if not response.tool_calls:
                 if self.verbose:
-                    print(f"\n> Final answer reached after {iteration+1} iterations")
+                    print(f"\n> Final answer after {iteration+1} iterations")
                 return {
                     "input"              : question,
                     "output"             : response.content,
                     "intermediate_steps" : intermediate_steps
                 }
 
-            # Execute each tool call the LLM requested
             for tool_call in response.tool_calls:
                 tool_name = tool_call["name"]
                 tool_args = tool_call["args"]
@@ -105,7 +98,6 @@ class FinancialAgent:
                     print(f"\n> Calling tool : {tool_name}")
                     print(f"  Input        : {tool_args}")
 
-                # Call the actual tool function
                 if tool_name in self.tool_map:
                     result = self.tool_map[tool_name].invoke(tool_args)
                 else:
@@ -114,15 +106,11 @@ class FinancialAgent:
                 if self.verbose:
                     print(f"  Output       : {str(result)[:300]}")
 
-                # Feed the tool result back to the LLM
                 messages.append(
                     ToolMessage(content=str(result), tool_call_id=tool_id)
                 )
-
-                # Record for the notebook trace
                 intermediate_steps.append((ToolAction(tool_name, tool_args), result))
 
-        # Reached max iterations without a final answer
         return {
             "input"              : question,
             "output"             : "Max iterations reached without a final answer.",

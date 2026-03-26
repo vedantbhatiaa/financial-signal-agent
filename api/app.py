@@ -33,14 +33,35 @@ from agent.agent import build_agent
 # App initialisation
 # ---------------------------------------------------------------------------
 
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
 app = FastAPI(
     title       = "Financial Signal Agent API",
     description = "LLM-powered agent querying stock prices, news sentiment, and SEC filings",
     version     = "1.0.0"
 )
 
-# Build the agent once at startup — avoids re-initialising connections on every request
+# Allow browser requests from any origin — needed when frontend
+# is served from a different port or opened as a local file
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins  = ["*"],
+    allow_methods  = ["*"],
+    allow_headers  = ["*"],
+)
+
+# Serve the frontend at the root URL — visit http://localhost:8000
+app.mount("/static", StaticFiles(directory="frontend"), name="static")
+
+@app.get("/")
+def serve_frontend():
+    return FileResponse("frontend/index.html")
+
+# Build the agent once at startup
 agent_executor = build_agent(verbose=False)
+
 
 LINEAGE_PATH = Path("./data/lineage/lineage_log.jsonl")
 
