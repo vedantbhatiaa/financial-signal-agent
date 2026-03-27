@@ -88,7 +88,7 @@ The knowledge graph is built from news articles at ingestion time — an edge be
 
 The agent calls `search_financial_news`, retrieves ticker-tagged chunks from ChromaDB, cross-references SEC filings, and returns a cited answer with source dates. Every query and tool call is logged to `data/lineage/agent_log.jsonl` for behaviour auditing.
 
-The same four tools are also exposed as a standalone MCP (Model Context Protocol) server in `agent/mcp_server.py` using FastMCP, allowing any MCP-compatible client to discover and invoke the pipeline's capabilities — demonstrating agent-to-service interaction patterns aligned with emerging A2A standards.
+The same four tools are also exposed as a standalone MCP (Model Context Protocol) server in `agent/mcp_server.py` using FastMCP, allowing any MCP-compatible client to discover and invoke the pipeline's capabilities.
 
 ---
 
@@ -96,7 +96,7 @@ The same four tools are also exposed as a standalone MCP (Model Context Protocol
 
 ![FastAPI query response](images/query.jpg)
 
-Every response includes the answer, which tools were invoked, source citations, and latency. Full API docs at `http://localhost:8000/docs`.
+Every response includes the answer, which tools were invoked, source citations, and latency.
 
 ---
 
@@ -114,8 +114,6 @@ Every pipeline stage writes a W3C PROV-DM aligned record to `data/lineage/lineag
   "notes": "all-MiniLM-L6-v2 (HuggingFace), chunk_size=500, overlap=50"
 }
 ```
-
-Accessible live via `GET http://localhost:8000/lineage`.
 
 ---
 
@@ -178,7 +176,7 @@ uvicorn api.app:app --reload --port 8000
 | `http://localhost:8000/lineage` | GET — data lineage audit log |
 | `http://localhost:8000/health` | GET — liveness check |
 
-### 6. (Optional) Run the MCP server
+### 6. Run the MCP server
 
 ```bash
 python agent/mcp_server.py
