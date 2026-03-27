@@ -8,43 +8,49 @@ Endpoints:
   GET  /health    — liveness check for Docker health checks
   GET  /lineage   — return the last N lineage records from the log
 
-This satisfies the brief's requirement to 'expose data via APIs'.
-It also means the agent can be called from external services, dashboards,
-or other agents — demonstrating the MCP-style agent-to-service model.
-
 Run locally:
     uvicorn api.app:app --reload --port 8000
-
-Or via Docker:
-    docker-compose up
 """
 
 import json
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from agent.agent import build_agent
 
 # ---------------------------------------------------------------------------
-# App initialisation
+# Lifespan — builds the agent once at startup using the modern FastAPI pattern
 # ---------------------------------------------------------------------------
 
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+agent_executor = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global agent_executor
+    agent_executor = build_agent(verbose=False)
+    yield
+    # shutdown logic here if needed
+
+# ---------------------------------------------------------------------------
+# App initialisation
+# ---------------------------------------------------------------------------
 
 app = FastAPI(
     title       = "Financial Signal Agent API",
     description = "LLM-powered agent querying stock prices, news sentiment, and SEC filings",
-    version     = "1.0.0"
+    version     = "1.0.0",
+    lifespan    = lifespan
 )
 
-# Allow browser requests from any origin — needed when frontend
-# is served from a different port or opened as a local file
+# Allow browser requests from any origin
 app.add_middleware(
     CORSMiddleware,
     allow_origins  = ["*"],
@@ -52,36 +58,31 @@ app.add_middleware(
     allow_headers  = ["*"],
 )
 
-# Serve the frontend at the root URL — visit http://localhost:8000
+# Serve the frontend at the root URL
 app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
 @app.get("/")
 def serve_frontend():
     return FileResponse("frontend/index.html")
 
-# Build the agent once at startup
-agent_executor = build_agent(verbose=False)
-
-
 LINEAGE_PATH = Path("./data/lineage/lineage_log.jsonl")
 
 
 # ---------------------------------------------------------------------------
-# Request / response models (Pydantic validates incoming JSON automatically)
+# Request / response models
 # ---------------------------------------------------------------------------
 
 class QueryRequest(BaseModel):
-    question: str
-    # Optional: caller can specify a session ID to maintain conversation memory
-    session_id: Optional[str] = "default"
+    question   : str
+    session_id : Optional[str] = "default"
 
 
 class QueryResponse(BaseModel):
-    answer      : str
-    tools_used  : list[str]
-    sources     : list[str]
-    latency_ms  : float
-    session_id  : str
+    answer     : str
+    tools_used : list[str]
+    sources    : list[str]
+    latency_ms : float
+    session_id : str
 
 
 class HealthResponse(BaseModel):
@@ -107,10 +108,7 @@ def query_agent(request: QueryRequest):
     pipeline, and returns a grounded answer with source citations.
 
     Example request body:
-        {
-          "question": "Is there a divergence between NVDA news sentiment and price?",
-          "session_id": "user123"
-        }
+        { "question": "Is there a divergence between NVDA news sentiment and price?" }
     """
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
@@ -124,19 +122,16 @@ def query_agent(request: QueryRequest):
 
     elapsed_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
 
-    # Extract tool names from intermediate steps for the response
     tools_used = [
         step[0].tool
         for step in result.get("intermediate_steps", [])
     ]
 
-    # Extract unique sources from tool observations (best-effort parsing)
     sources = []
     for step in result.get("intermediate_steps", []):
         observation = step[1]
         try:
             obs_json = json.loads(observation)
-            # news/filing results have a 'results' key with source metadata
             for item in obs_json.get("results", []):
                 src = item.get("source", "")
                 if src and src not in sources:
@@ -155,11 +150,7 @@ def query_agent(request: QueryRequest):
 
 @app.get("/lineage", tags=["Operations"])
 def get_lineage(limit: int = 20):
-    """Return the most recent N records from the data lineage log.
-
-    Useful for auditing what data was ingested and when, and for
-    verifying the pipeline ran correctly.
-    """
+    """Return the most recent N records from the data lineage log."""
     if not LINEAGE_PATH.exists():
         return {"records": [], "message": "Lineage log not found — run the pipeline first"}
 
@@ -171,5 +162,4 @@ def get_lineage(limit: int = 20):
             except json.JSONDecodeError:
                 pass
 
-    # Return most recent first
     return {"records": list(reversed(records))[:limit], "total": len(records)}

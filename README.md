@@ -3,7 +3,7 @@
 > An LLM-powered financial intelligence platform that synthesises stock price data, live news sentiment, and SEC regulatory filings into grounded, auditable investment signals via a natural language agent interface.
 
 **Module**: MSIN0166 Data Engineering · UCL School of Management · 2025/26  
-**Stack**: Python · LangChain · Groq (Llama 3.3) · PostgreSQL · MongoDB · ChromaDB · FastAPI · Docker
+**Stack**: Python · LangChain · Groq (Llama 3.3) · PostgreSQL · MongoDB · ChromaDB · NetworkX · FastAPI · Docker
 
 ---
 
@@ -23,13 +23,14 @@
 financial-signal-agent/
 │
 ├── notebooks/
-│   ├── 01_data_ingestion.ipynb   # Ingest prices, news, SEC filings
+│   ├── 01_data_ingestion.ipynb   # Ingest prices, news, SEC filings, knowledge graph
 │   ├── 02_pipeline.ipynb         # Transform, embed into ChromaDB, lineage
 │   └── 03_agent_demo.ipynb       # Live agent queries with tool traces
 │
 ├── agent/
-│   ├── tools.py                  # 3 LangChain tool definitions
-│   └── agent.py                  # FinancialAgent class + system prompt
+│   ├── tools.py                  # 4 LangChain tool definitions
+│   ├── agent.py                  # FinancialAgent class + system prompt + behaviour logging
+│   └── mcp_server.py             # FastMCP server exposing all 4 tools via MCP protocol
 │
 ├── api/
 │   └── app.py                    # FastAPI REST wrapper (CORS, /query, /lineage)
@@ -44,7 +45,7 @@ financial-signal-agent/
 │
 ├── data/                         # Generated at runtime — not tracked in Git
 │   ├── chroma/                   # ChromaDB vector store (persistent)
-│   └── lineage/                  # lineage_log.jsonl — W3C Prov-aligned audit trail
+│   └── lineage/                  # lineage_log.jsonl + agent_log.jsonl
 │
 ├── docker-compose.yml            # PostgreSQL + MongoDB services
 ├── Dockerfile                    # Application container
@@ -61,6 +62,7 @@ financial-signal-agent/
 | Alpha Vantage API | Structured OHLCV | PostgreSQL | `query_price_data` |
 | RSS feeds — Reuters, FT, Yahoo Finance (3 general + 10 ticker-specific) | Unstructured text | MongoDB + ChromaDB | `search_financial_news` |
 | SEC EDGAR API — 10-K and 10-Q filings | Semi-structured documents | MongoDB + ChromaDB | `search_financial_news`, `get_filing_metadata` |
+| News co-mention graph (derived) | Graph — nodes=companies, edges=shared articles | MongoDB | `query_knowledge_graph` |
 
 **Tickers monitored**: AAPL · NVDA · MSFT · GOOGL · AMZN · TSLA · META · JPM · GS · BAC
 
@@ -73,7 +75,10 @@ financial-signal-agent/
 | PostgreSQL | OHLCV prices, SMA-20, RSI-14, price_change_pct, anomaly flags | ~1,000 rows · 9 tickers · 100 days |
 | MongoDB `news_articles` | Headlines, summaries, ticker tags, source, url_hash | ~300 documents |
 | MongoDB `sec_filings` | Ticker, form type, filing date, risk text, accession number | 20 documents |
+| MongoDB `knowledge_graph` | NetworkX co-mention graph — company nodes, weighted co-mention edges | 10 nodes, variable edges |
 | ChromaDB `news_chunks` + `filing_chunks` | 384-dim semantic vectors, all-MiniLM-L6-v2 | ~300 chunks |
+
+The knowledge graph is built from news articles at ingestion time — an edge between two companies indicates they appear together in news headlines, with edge weight proportional to co-mention frequency. This satisfies the graph database criterion using MongoDB as the persistence layer alongside the relational, document, and vector stores.
 
 ---
 
@@ -81,7 +86,9 @@ financial-signal-agent/
 
 ![Agent sentiment query](images/sentiment.jpg)
 
-The agent calls `search_financial_news`, retrieves ticker-tagged chunks from ChromaDB, cross-references SEC filings, and returns a cited answer with source dates.
+The agent calls `search_financial_news`, retrieves ticker-tagged chunks from ChromaDB, cross-references SEC filings, and returns a cited answer with source dates. Every query and tool call is logged to `data/lineage/agent_log.jsonl` for behaviour auditing.
+
+The same four tools are also exposed as a standalone MCP (Model Context Protocol) server in `agent/mcp_server.py` using FastMCP, allowing any MCP-compatible client to discover and invoke the pipeline's capabilities — demonstrating agent-to-service interaction patterns aligned with emerging A2A standards.
 
 ---
 
@@ -95,7 +102,7 @@ Every response includes the answer, which tools were invoked, source citations, 
 
 ## Data Lineage
 
-Every pipeline stage writes a W3C PROV-DM aligned record to `data/lineage/lineage_log.jsonl`:
+Every pipeline stage writes a W3C PROV-DM aligned record to `data/lineage/lineage_log.jsonl`. Agent behaviour (queries, tools called, answers) is separately logged to `data/lineage/agent_log.jsonl`:
 
 ```json
 {
@@ -142,7 +149,7 @@ docker compose up -d postgres mongo
 python -m venv venv
 venv\Scripts\activate        # Windows
 pip install -r requirements.txt
-pip install langchain-groq langchain-huggingface sentence-transformers
+pip install langchain-groq langchain-huggingface sentence-transformers mcp
 nbstripout --install
 ```
 
@@ -171,6 +178,14 @@ uvicorn api.app:app --reload --port 8000
 | `http://localhost:8000/lineage` | GET — data lineage audit log |
 | `http://localhost:8000/health` | GET — liveness check |
 
+### 6. (Optional) Run the MCP server
+
+```bash
+python agent/mcp_server.py
+```
+
+This starts a standalone MCP server exposing all four agent tools via the Model Context Protocol, allowing external MCP-compatible clients to invoke the pipeline directly.
+
 ---
 
 ## Known Limitations
@@ -178,6 +193,7 @@ uvicorn api.app:app --reload --port 8000
 - **SEC risk text**: Filing metadata is fully ingested but full Item 1A text extraction uses a placeholder. In production, BeautifulSoup would parse the SEC HTML to extract the complete risk section.
 - **Price history**: Alpha Vantage free tier returns 100 trading days. A paid tier provides full historical data.
 - **News coverage**: RSS feeds capture articles available at ingestion time. A production system would run continuous scheduled ingestion for balanced ticker coverage.
+- **Groq free tier**: 100,000 tokens/day on llama-3.3-70b-versatile. In production, token-efficient prompt compression or model routing would address this constraint.
 
 ---
 
@@ -188,5 +204,5 @@ uvicorn api.app:app --reload --port 8000
 | Evaluate data processing strategies | Three-stage pipeline with documented design decisions per stage |
 | Understand scaling options | PostgreSQL indexes, ChromaDB vector store, stateless agent tools |
 | Explain effective data pipelines | Transform → Embed → Lineage with W3C Prov-aligned logging |
-| Evaluate platform choices | Justified PostgreSQL vs MongoDB vs ChromaDB per data type |
-| Evaluate technology trends | RAG, LLM agents, MCP-style tool interfaces, Docker containerisation |
+| Evaluate platform choices | Justified PostgreSQL vs MongoDB vs ChromaDB vs NetworkX graph per data type |
+| Evaluate technology trends | RAG, LLM agents, MCP protocol server, Docker containerisation, graph data structures |
