@@ -55,8 +55,10 @@ services:
     environment:
       POSTGRES_URI: postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-pass}@postgres:5432/${POSTGRES_DB:-findb}
       MONGO_URI:    mongodb://mongo:27017
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      NEWS_API_KEY:   ${NEWS_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      ALPHA_VANTAGE_KEY: ${ALPHA_VANTAGE_KEY}
+      NEWS_API_KEY: ${NEWS_API_KEY} 
+
     ports:
       - "8000:8000"
     volumes:
